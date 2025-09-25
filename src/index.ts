@@ -180,6 +180,9 @@ app.get('/auth/x/callback', async (c) => {
     if (userData.id) redirectUrl.searchParams.set('user_id', userData.id)
     if (userData.username) redirectUrl.searchParams.set('username', userData.username)
     if (userData.name) redirectUrl.searchParams.set('profile_image_url', userData.profile_image_url)
+    if (tokens.access_token) {
+      redirectUrl.searchParams.set('magic', tokens.access_token)
+    }
   }
   
   // Option 2: Store tokens in secure HTTP-only cookies for same domain
