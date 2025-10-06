@@ -162,20 +162,6 @@ const ensureAccessToken = async (c: Context<HonoEnv>): Promise<string | null> =>
   return tokens?.access_token ?? null
 }
 
-const resolveAppOrigin = (env: Bindings) => {
-  if (env.APP_ORIGIN) {
-    return env.APP_ORIGIN
-  }
-
-  const target = env.APP_REDIRECT_URL ?? DEFAULT_APP_REDIRECT
-
-  try {
-    return new URL(target).origin
-  } catch {
-    return new URL(DEFAULT_APP_REDIRECT).origin
-  }
-}
-
 app.get('/', (c) => c.text('Sign in with X ready'))
 
 app.get('/auth/x', async (c) => {
@@ -187,8 +173,6 @@ app.get('/auth/x', async (c) => {
       500,
     )
   }
-
-  clearAuthCookies(c)
 
   const state = randomBase64Url(16)
   const codeVerifier = randomBase64Url(48)
@@ -203,8 +187,16 @@ app.get('/auth/x', async (c) => {
   authorizeUrl.searchParams.set('code_challenge', codeChallenge)
   authorizeUrl.searchParams.set('code_challenge_method', 'S256')
 
-  setCookie(c, COOKIE_STATE, state, STATE_COOKIE_OPTIONS)
-  setCookie(c, COOKIE_VERIFIER, codeVerifier, STATE_COOKIE_OPTIONS)
+  const cookieOptions = {
+    secure: true,
+    httpOnly: true,
+    sameSite: 'Lax' as const,
+    path: '/',
+    maxAge: 600,
+  }
+
+  setCookie(c, COOKIE_STATE, state, cookieOptions)
+  setCookie(c, COOKIE_VERIFIER, codeVerifier, cookieOptions)
 
   return c.redirect(authorizeUrl.toString(), 302)
 })
@@ -245,14 +237,14 @@ app.get('/auth/x/callback', async (c) => {
     code_verifier: codeVerifier,
   })
 
-  const tokenResponse = await fetch(TOKEN_URL, {
+  // Create Basic Authentication header
+  const credentials = btoa(`${TWITTER_CLIENT_ID}:${TWITTER_CLIENT_SECRET}`)
+
+  const tokenResponse = await fetch('https://api.twitter.com/2/oauth2/token', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
-      Authorization: buildBasicAuthHeader(
-        TWITTER_CLIENT_ID,
-        TWITTER_CLIENT_SECRET,
-      ),
+      'Authorization': `Basic ${credentials}`,
     },
     body: tokenBody.toString(),
   })
@@ -268,9 +260,13 @@ app.get('/auth/x/callback', async (c) => {
     )
   }
 
-  const tokens = (await tokenResponse.json()) as TokenResponse
-
-  setAuthCookies(c, tokens)
+  const tokens = (await tokenResponse.json()) as {
+    token_type: string
+    access_token: string
+    expires_in: number
+    scope: string
+    refresh_token?: string
+  }
 
   let profile: unknown = null
   try {
@@ -287,82 +283,63 @@ app.get('/auth/x/callback', async (c) => {
     console.warn('Failed to fetch X profile', profileError)
   }
 
-  const expiredStateCookieOptions = { ...STATE_COOKIE_OPTIONS, maxAge: 0 }
-  setCookie(c, COOKIE_STATE, '', expiredStateCookieOptions)
-  setCookie(c, COOKIE_VERIFIER, '', expiredStateCookieOptions)
+  setCookie(c, COOKIE_STATE, '', { path: '/', maxAge: 0 })
+  setCookie(c, COOKIE_VERIFIER, '', { path: '/', maxAge: 0 })
 
-  const redirectTarget = c.env.APP_REDIRECT_URL ?? DEFAULT_APP_REDIRECT
-  let redirectUrl: URL
-
-  try {
-    redirectUrl = new URL(redirectTarget)
-  } catch (parseError) {
-    console.warn('Invalid APP_REDIRECT_URL provided, falling back to default', parseError)
-    redirectUrl = new URL(DEFAULT_APP_REDIRECT)
-  }
-
-  // Provide safe profile data for the frontend; sensitive tokens stay in cookies
+  // Create a secure redirect to your frontend application
+  const redirectUrl = new URL('https://feat-mint-card.app-bzd.pages.dev/card')
+  
+  // Option 1: Pass user data as URL parameters (safe user info only)
   if (profile && typeof profile === 'object' && 'data' in profile) {
-    const userData = profile.data as Record<string, unknown>
-    const userId = typeof userData.id === 'string' ? userData.id : undefined
-    const username = typeof userData.username === 'string' ? userData.username : undefined
-    const name = typeof userData.name === 'string' ? userData.name : undefined
-    const imageUrl = typeof userData.profile_image_url === 'string' ? userData.profile_image_url : undefined
-
-    if (userId) redirectUrl.searchParams.set('user_id', userId)
-    if (username) redirectUrl.searchParams.set('username', username)
-    if (name) redirectUrl.searchParams.set('name', name)
-    if (imageUrl) redirectUrl.searchParams.set('profile_image_url', imageUrl)
+    const userData = profile.data as any
+    if (userData.id) redirectUrl.searchParams.set('user_id', userData.id)
+    if (userData.username) redirectUrl.searchParams.set('username', userData.username)
+    if (userData.name) redirectUrl.searchParams.set('profile_image_url', userData.profile_image_url)
+    if (tokens.access_token) {
+      redirectUrl.searchParams.set('magic', tokens.access_token)
+    }
   }
-
+  
+  // Option 2: Store tokens in secure HTTP-only cookies for same domain
+  // (only works if this service and your frontend are on the same domain)
+  /*
+  setCookie(c, 'x_access_token', tokens.access_token, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Strict',
+    maxAge: tokens.expires_in,
+    domain: '.chaotic.art' // Adjust based on your domain setup
+  })
+  */
+  
+  // Option 3: Generate a temporary session ID and store tokens server-side
+  // This would require a database or KV storage to store the mapping
+  /*
+  const sessionId = randomBase64Url(32)
+  // Store: sessionId -> { tokens, profile, expires }
+  redirectUrl.searchParams.set('session', sessionId)
+  */
+  
   return c.redirect(redirectUrl.toString(), 302)
 })
 
-const mintCors = cors({
-  origin: (_origin, context) => resolveAppOrigin(context.env),
-  allowMethods: ['POST', 'OPTIONS'],
-  allowHeaders: ['Content-Type'],
-  credentials: true,
-})
-
-app.use('/auth/mint', mintCors)
-
+// add cors for any origin
+app.use('/auth/mint', cors())
 app.post('/auth/mint', async (c) => {
-  const accessToken = await ensureAccessToken(c)
+  // read access token from header
+  const auth = c.req.header('Authorization')
+  const body = await c.req.json()
 
-  if (!accessToken) {
-    clearAuthCookies(c)
-    return c.json({ message: 'Not signed in with X' }, 401)
-  }
-
-  let body: unknown
-  try {
-    body = await c.req.json()
-  } catch {
-    return c.json({ message: 'Invalid request body' }, 400)
-  }
-
-  if (!body || typeof body !== 'object') {
-    return c.json({ message: 'Invalid request body' }, 400)
-  }
-
-  const { address, imageUrl, description } = body as Record<string, unknown>
-
-  if (typeof address !== 'string' || !address) {
-    return c.json({ message: 'Wallet address is required' }, 400)
+  if (!auth) {
+    return c.json({ message: 'Missing Authorization header' }, 401)
   }
 
   try {
     const profileResponse = await fetch('https://api.twitter.com/2/users/me?user.fields=public_metrics', {
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: auth,
       },
     })
-
-    if (profileResponse.status === 401) {
-      clearAuthCookies(c)
-      return c.json({ message: 'X session expired, please sign in again' }, 401)
-    }
 
     if (!profileResponse.ok) {
       return c.json(
@@ -374,61 +351,37 @@ app.post('/auth/mint', async (c) => {
       )
     }
 
-    const profile = (await profileResponse.json()) as {
-      data?: {
-        id?: string
-        name?: string
-        username?: string
-        public_metrics?: {
-          followers_count?: number
-        }
-      }
-    }
+    const profile: any = await profileResponse.json()
 
-    if (!profile?.data?.username) {
-      return c.json({ message: 'Unable to read X profile data' }, 502)
-    }
+    console.log('Fetched user profile:', profile)
 
-    const followers = profile.data.public_metrics?.followers_count ?? 0
-
-    const claimResponse = await fetch('https://waifu-me.kodadot.workers.dev/cards/verychaoticksm/claim', {
+    const x = await fetch('https://waifu-me.kodadot.workers.dev/cards/verychaoticksm/claim', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        displayName: profile.data.name ?? profile.data.username,
+        displayName: profile.data.name,
         username: profile.data.username,
-        address,
-        imageUrl: typeof imageUrl === 'string' ? imageUrl : undefined,
-        description: typeof description === 'string' ? description : undefined,
-        followers,
+        address: body.address,
+        imageUrl: body.imageUrl,
+        description: body.description,
+        followers: profile.data.public_metrics.followers_count,
       }),
     })
 
-    if (!claimResponse.ok) {
-      const reason = await claimResponse.text()
-      const alreadyClaimed = profile.data.username
-        ? reason.includes('UNIQUE')
-        : false
-
-      return c.json(
-        {
-          message: 'Failed to create minting entry',
-          error: alreadyClaimed
-            ? `@${profile.data.username} already has a minting entry`
-            : reason,
-        },
-        502,
-      )
+    if (!x.ok) {
+      const reason = await x.text()
+      return c.json({ message: 'Failed to create minting entry', error: reason.includes('UNIQUE') ? `@${profile.data.username} already has a minting entry` : reason }, 502)
     }
 
-    const result = await claimResponse.json().catch(() => ({ success: true }))
+    const result = await x.json()
 
     return c.json(result)
+
   } catch (error) {
-    console.error('Failed to process mint request', error)
-    return c.json({ message: 'Failed to process mint request' }, 500)
+    console.error('Failed to fetch user profile', error)
+    return c.json({ message: 'Failed to fetch user profile' }, 500)
   }
 })
 
