@@ -178,7 +178,7 @@ app.get('/auth/x', async (c) => {
   const codeVerifier = randomBase64Url(48)
   const codeChallenge = await sha256Base64Url(codeVerifier)
 
-  const authorizeUrl = new URL('https://twitter.com/i/oauth2/authorize')
+  const authorizeUrl = new URL('https://x.com/i/oauth2/authorize')
   authorizeUrl.searchParams.set('response_type', 'code')
   authorizeUrl.searchParams.set('client_id', TWITTER_CLIENT_ID)
   authorizeUrl.searchParams.set('redirect_uri', TWITTER_REDIRECT_URI)
