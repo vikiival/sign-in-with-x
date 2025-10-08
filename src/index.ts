@@ -287,7 +287,7 @@ app.get('/auth/x/callback', async (c) => {
   setCookie(c, COOKIE_VERIFIER, '', { path: '/', maxAge: 0 })
 
   // Create a secure redirect to your frontend application
-  const redirectUrl = new URL('https://feat-mint-card.app-bzd.pages.dev/card')
+  const redirectUrl = new URL('https://beta.chaotic.art/card')
   
   // Option 1: Pass user data as URL parameters (safe user info only)
   if (profile && typeof profile === 'object' && 'data' in profile) {
