@@ -355,7 +355,7 @@ app.post('/auth/mint', async (c) => {
 
     console.log('Fetched user profile:', profile)
 
-    const x = await fetch('https://waifu-me.kodadot.workers.dev/cards/verychaoticksm/claim', {
+    const x = await fetch('https://waifu-me.kodadot.workers.dev/cards/chaoticdot/claim', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
